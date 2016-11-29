@@ -1,15 +1,19 @@
 package com.example.roman.filedownloader;
 
 import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.database.Cursor;
 import android.graphics.BitmapFactory;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.support.design.widget.Snackbar;
 import android.support.v7.app.AppCompatActivity;
-import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.ImageView;
@@ -25,6 +29,8 @@ public class FileDownloaderActivity extends AppCompatActivity implements View.On
   private static final String STATUS_DOWNLOADED = "Status: Downloaded";
   private static final String DOWNLOAD_REFERENCE = "downloadManager";
   private static final String STATUS_PAUSE = "Status: Paused";
+  private static final String NO_CONNECTION = "No connection to the Internet";
+  public static final String DOWNLOAD_FAIL = "Downloading failed";
   private DownloadManager downloadManager;
   private long downloadReference = -1;
   private Button downloadButton;
@@ -32,6 +38,7 @@ public class FileDownloaderActivity extends AppCompatActivity implements View.On
   private ImageView imageView;
   private ProgressBar progressBar;
   private TextView statusTextView;
+  private BroadcastReceiver receiver;
 
 
   @Override
@@ -48,33 +55,51 @@ public class FileDownloaderActivity extends AppCompatActivity implements View.On
     openButton.setOnClickListener(this);
     downloadManager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
 
-    if (savedInstanceState != null) {
-      downloadReference = savedInstanceState.getLong(DOWNLOAD_REFERENCE);
-      if (downloadReference != -1) {
-        switch (getDownloaderStatus(downloadReference)){
-          case DownloadManager.STATUS_SUCCESSFUL:
-            if(imageExists()){
-              setupDownloadedImage();
-            }
-            break;
-          case DownloadManager.STATUS_RUNNING:
-            progressBar.setVisibility(View.VISIBLE);
-            downloadButton.setEnabled(false);
-            break;
-          case DownloadManager.STATUS_PAUSED:
-            progressBar.setVisibility(View.VISIBLE);
-            downloadButton.setEnabled(false);
-            statusTextView.setText(STATUS_PAUSE);
-            break;
+    receiver = new BroadcastReceiver() {
+      @Override
+      public void onReceive(Context context, Intent intent) {
+        String action = intent.getAction();
+        if (DownloadManager.ACTION_DOWNLOAD_COMPLETE.equals(action)) {
+          if (getDownloaderStatus(downloadReference) == DownloadManager.STATUS_SUCCESSFUL) {
+            setupDownloadedImage();
+          }
         }
-      } else if (imageExists()) {
-        setupDownloadedImage();
       }
-    } else {
-      if (imageExists()) {
-        setupDownloadedImage();
+    };
+    registerReceiver(receiver, new IntentFilter(
+            DownloadManager.ACTION_DOWNLOAD_COMPLETE));
+
+    if (savedInstanceState != null && savedInstanceState.getLong(DOWNLOAD_REFERENCE) != -1) {
+      downloadReference = savedInstanceState.getLong(DOWNLOAD_REFERENCE);
+      switch (getDownloaderStatus(downloadReference)) {
+        case DownloadManager.STATUS_SUCCESSFUL:
+          if (imageExists()) {
+            setupDownloadedImage();
+          }
+          break;
+        case DownloadManager.STATUS_RUNNING:
+          progressBar.setVisibility(View.VISIBLE);
+          downloadButton.setEnabled(false);
+          break;
+        case DownloadManager.STATUS_PAUSED:
+          progressBar.setVisibility(View.VISIBLE);
+          downloadButton.setEnabled(false);
+          statusTextView.setText(STATUS_PAUSE);
+          if (!isOnline()) {
+            Snackbar.make(findViewById(R.id.a_file_downloader), NO_CONNECTION, Snackbar.LENGTH_SHORT).show();
+          }
+          break;
       }
+    } else if (imageExists()) {
+      setupDownloadedImage();
     }
+  }
+
+  public boolean isOnline() {
+    ConnectivityManager cm =
+            (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+    NetworkInfo netInfo = cm.getActiveNetworkInfo();
+    return netInfo != null && netInfo.isConnectedOrConnecting();
   }
 
 
@@ -87,6 +112,12 @@ public class FileDownloaderActivity extends AppCompatActivity implements View.On
   }
 
   @Override
+  protected void onDestroy() {
+    unregisterReceiver(receiver);
+    super.onDestroy();
+  }
+
+  @Override
   protected void onSaveInstanceState(Bundle outState) {
     outState.putLong(DOWNLOAD_REFERENCE, downloadReference);
     super.onSaveInstanceState(outState);
@@ -95,6 +126,7 @@ public class FileDownloaderActivity extends AppCompatActivity implements View.On
   private void setupDownloadedImage() {
     imageView.setImageBitmap(BitmapFactory.decodeFile((Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS) + "/" + IMAGE_FILENAME)));
     downloadButton.setVisibility(View.GONE);
+    progressBar.setVisibility(View.INVISIBLE);
     statusTextView.setText(STATUS_DOWNLOADED);
     openButton.setVisibility(View.VISIBLE);
   }
@@ -111,13 +143,11 @@ public class FileDownloaderActivity extends AppCompatActivity implements View.On
         request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, IMAGE_FILENAME);
         downloadReference = downloadManager.enqueue(request);
         new Thread(setupDownloading).start();
-
         break;
       case R.id.button_open:
         Intent intent = new Intent();
         intent.setAction(Intent.ACTION_VIEW);
         Uri uriFromFile = Uri.fromFile(new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS) + "/" + IMAGE_FILENAME));
-        Log.d("TRY OPEN", String.valueOf(new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS) + "/" + IMAGE_FILENAME).exists()));
         intent.setDataAndType(uriFromFile, "image/*");
         startActivity(intent);
     }
@@ -125,8 +155,6 @@ public class FileDownloaderActivity extends AppCompatActivity implements View.On
 
   private boolean imageExists() {
     File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS) + "/" + IMAGE_FILENAME);
-    Log.d("CHECK FILE", file.getAbsolutePath());
-    Log.d("CHECK FILE", String.valueOf(file.exists()));
     return file.exists();
   }
 
@@ -136,7 +164,6 @@ public class FileDownloaderActivity extends AppCompatActivity implements View.On
     public void run() {
 
       boolean downloading = true;
-
       while (downloading) {
         DownloadManager.Query q = new DownloadManager.Query();
         q.setFilterById(downloadReference);
@@ -152,33 +179,49 @@ public class FileDownloaderActivity extends AppCompatActivity implements View.On
 
         final double dl_progress = ((bytes_downloaded + .0) / bytes_total) * 100;
 
-        runOnUiThread(new Runnable() {
-
-          @Override
-          public void run() {
-            progressBar.setProgress((int) dl_progress);
-            switch (cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS))) {
-              case DownloadManager.STATUS_FAILED:
-                Snackbar.make(findViewById(R.id.a_file_downloader), "Downloading failed", Snackbar.LENGTH_LONG).show();
-                break;
-
-              case DownloadManager.STATUS_RUNNING:
+        switch (cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS))) {
+          case DownloadManager.STATUS_FAILED:
+            downloading = false;
+            runOnUiThread(new Runnable() {
+              @Override
+              public void run() {
+                Snackbar.make(findViewById(R.id.a_file_downloader), DOWNLOAD_FAIL, Snackbar.LENGTH_LONG).show();
+              }
+            });
+            break;
+          case DownloadManager.STATUS_RUNNING:
+            runOnUiThread(new Runnable() {
+              @Override
+              public void run() {
+                progressBar.setProgress((int) dl_progress);
                 statusTextView.setText(STATUS_DOWNLOADING);
-                break;
-
-              case DownloadManager.STATUS_SUCCESSFUL:
+              }
+            });
+            break;
+          case DownloadManager.STATUS_SUCCESSFUL:
+            runOnUiThread(new Runnable() {
+              @Override
+              public void run() {
                 statusTextView.setText(STATUS_DOWNLOADED);
                 progressBar.setVisibility(View.INVISIBLE);
                 setupDownloadedImage();
-                break;
+              }
+            });
+            downloading = false;
+            break;
+          /*case DownloadManager.STATUS_PAUSED:
+            if (!isOnline()) {
+              Snackbar.make(findViewById(R.id.a_file_downloader), NO_CONNECTION, Snackbar.LENGTH_SHORT).show();
             }
-            cursor.close();
-          }
-        });
+            break;*/
+        }
+        cursor.close();
+
 
       }
 
     }
   };
+
 
 }
